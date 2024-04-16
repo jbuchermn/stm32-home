@@ -3,11 +3,12 @@
 PROJECT=stm32-test
 BUILD_DIR=bin
 
-CFILES=main.c usb_uart.c
+CFILES=main.c platform.c cdcacm.c dali.c util.c
 AFILES= 
+LDLIBS=
 
 DEVICE=stm32f103c8t6
-OOCD_FILE = ./stm32f4discovery.cfg
+OOCD_FILE = ./bluepill.cfg
 
 VPATH= 
 INCLUDES= 
@@ -166,8 +167,8 @@ $(PROJECT).elf: $(OBJS) $(LDSCRIPT) $(LIBDEPS)
 %.list: %.elf
 	$(OBJDUMP) -S $< > $@
 
-flash: $(PROJECT).bin
-	st-flash write $(PROJECT).bin 0x8000000
+flash: $(PROJECT).elf
+	sudo openocd -f $(OOCD_FILE) -c "program $(PROJECT).elf verify reset exit"
 
 clean:
 	rm -rf $(BUILD_DIR) $(GENERATED_BINS)

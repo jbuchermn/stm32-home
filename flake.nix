@@ -19,8 +19,13 @@
           with pkgs; mkShell {
             buildInputs = [
               python3
+
               gcc-arm-embedded
+              # pkgsCross.arm-embedded.buildPackages.gdb # see https://github.com/NixOS/nixpkgs/issues/299754
+
               stlink
+              openocd
+
               bear
               usbutils
               minicom

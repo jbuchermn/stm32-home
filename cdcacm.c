@@ -1,12 +1,17 @@
 // Source: https://github.com/roddehugo/bluepill-serial
-
-#include "usb_uart.h"
-
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/usb/cdc.h>
 #include <libopencm3/usb/usbd.h>
+
+#include "cdcacm.h"
+#include "main.h"
+#include "util.h"
+
+#define NOTIF_PACKET_SIZE 16
+#define CDCACM_PACKET_SIZE 64
+#define CDCACM_RETRY 10
 
 #define USB_DRV st_usbfs_v1_usb_driver
 #define USB_IRQ NVIC_USB_LP_CAN_RX0_IRQ
@@ -20,18 +25,6 @@ static char serialno[9] = {0};
 static usbd_device *usbdev = 0;
 static uint16_t usbd_configuration = 0;
 static uint8_t usbd_control_buffer[256];
-
-__attribute__((always_inline)) inline void assertm(bool condition,
-                                                   const char *msg) {
-  if (!__builtin_expect(condition, 1)) {
-    static volatile const char *reason;
-    reason = msg;
-    (void)reason;
-    __asm__ volatile("bkpt");
-    while (1)
-      ;
-  }
-}
 
 static const char *usb_strings[] = {
     "Hugo Rodde http://roddehugo.com",
@@ -84,10 +77,10 @@ static const struct usb_endpoint_descriptor data_endp[] = {
     }};
 
 static const struct {
-  struct usb_cdc_header_descriptor header;
-  struct usb_cdc_call_management_descriptor call_mgmt;
-  struct usb_cdc_acm_descriptor acm;
-  struct usb_cdc_union_descriptor cdc_union;
+    struct usb_cdc_header_descriptor header;
+    struct usb_cdc_call_management_descriptor call_mgmt;
+    struct usb_cdc_acm_descriptor acm;
+    struct usb_cdc_union_descriptor cdc_union;
 } __attribute__((packed)) cdcacm_functional_descriptors = {
     .header =
         {
@@ -186,143 +179,194 @@ static const struct usb_config_descriptor config = {
 
 static void cdcacm_set_modem_state(usbd_device *dev, int iface, bool dsr,
                                    bool dcd) {
-  char buf[10];
-  struct usb_cdc_notification *notif = (void *)buf;
-  /* We echo signals back to host as notification. */
-  notif->bmRequestType = 0xA1;
-  notif->bNotification = USB_CDC_NOTIFY_SERIAL_STATE;
-  notif->wValue = 0;
-  notif->wIndex = iface;
-  notif->wLength = 2;
-  buf[8] = (dsr ? 2 : 0) | (dcd ? 1 : 0);
-  buf[9] = 0;
-  usbd_ep_write_packet(dev, 0x82 + iface, buf, 10);
+    char buf[10];
+    struct usb_cdc_notification *notif = (void *)buf;
+    /* We echo signals back to host as notification. */
+    notif->bmRequestType = 0xA1;
+    notif->bNotification = USB_CDC_NOTIFY_SERIAL_STATE;
+    notif->wValue = 0;
+    notif->wIndex = iface;
+    notif->wLength = 2;
+    buf[8] = (dsr ? 2 : 0) | (dcd ? 1 : 0);
+    buf[9] = 0;
+    usbd_ep_write_packet(dev, 0x82 + iface, buf, 10);
 }
 
 static enum usbd_request_return_codes cdcacm_control_request(
     usbd_device *dev, struct usb_setup_data *req, uint8_t **buf, uint16_t *len,
     void (**complete)(usbd_device *dev, struct usb_setup_data *req)) {
-  (void)dev;
-  (void)buf;
-  (void)complete;
+    (void)dev;
+    (void)buf;
+    (void)complete;
 
-  switch (req->bRequest) {
-  case USB_CDC_REQ_SET_CONTROL_LINE_STATE:
-    cdcacm_set_modem_state(dev, req->wIndex, true, true);
-    return USBD_REQ_HANDLED;
-  case USB_CDC_REQ_SET_LINE_CODING:
-    if (*len < sizeof(struct usb_cdc_line_coding))
-      return USBD_REQ_NOTSUPP;
-    return USBD_REQ_HANDLED;
-  }
-  return USBD_REQ_NOTSUPP;
+    switch (req->bRequest) {
+    case USB_CDC_REQ_SET_CONTROL_LINE_STATE:
+        cdcacm_set_modem_state(dev, req->wIndex, true, true);
+        return USBD_REQ_HANDLED;
+    case USB_CDC_REQ_SET_LINE_CODING:
+        if (*len < sizeof(struct usb_cdc_line_coding))
+            return USBD_REQ_NOTSUPP;
+        return USBD_REQ_HANDLED;
+    }
+    return USBD_REQ_NOTSUPP;
 }
 
+/* RX and TX */
+static char __rx_buf[CDCACM_BUFSIZE];
+static char __tx_buf[CDCACM_BUFSIZE];
+
+static uint16_t __rx_at;
+static uint16_t __rx_len;
+static uint16_t __tx_at;
+static uint16_t __tx_len;
+
 static void cdcacm_data_rx_cb(usbd_device *dev, uint8_t ep) {
-  (void)ep;
+    /* Overflow - read to slow */
+    if (CDCACM_BUFSIZE < __rx_len + CDCACM_PACKET_SIZE) {
+        __rx_at = 0;
+        __rx_len = 0;
+    }
 
-  static char buf[CDCACM_PACKET_SIZE + 1];
-  uint16_t len = usbd_ep_read_packet(dev, 0x01, buf, CDCACM_PACKET_SIZE);
-
-  /* Echo buffer back to TX line. */
-  cdcacm_write_now(buf, len);
+    __rx_len +=
+        usbd_ep_read_packet(dev, 0x01, __rx_buf + __rx_len, CDCACM_PACKET_SIZE);
 }
 
 static void cdcacm_set_config(usbd_device *dev, uint16_t wValue) {
-  /* Store configuration value. */
-  usbd_configuration = wValue;
+    /* Store configuration value. */
+    usbd_configuration = wValue;
 
-  /* Setup interface. */
-  usbd_ep_setup(dev, 0x01, USB_ENDPOINT_ATTR_BULK, CDCACM_PACKET_SIZE,
-                cdcacm_data_rx_cb);
-  usbd_ep_setup(dev, 0x81, USB_ENDPOINT_ATTR_BULK, CDCACM_PACKET_SIZE, 0);
-  usbd_ep_setup(dev, 0x82, USB_ENDPOINT_ATTR_INTERRUPT, NOTIF_PACKET_SIZE, 0);
+    /* Setup interface. */
+    usbd_ep_setup(dev, 0x01, USB_ENDPOINT_ATTR_BULK, CDCACM_PACKET_SIZE,
+                  cdcacm_data_rx_cb);
+    usbd_ep_setup(dev, 0x81, USB_ENDPOINT_ATTR_BULK, CDCACM_PACKET_SIZE, 0);
+    usbd_ep_setup(dev, 0x82, USB_ENDPOINT_ATTR_INTERRUPT, NOTIF_PACKET_SIZE, 0);
 
-  usbd_register_control_callback(
-      dev, USB_REQ_TYPE_CLASS | USB_REQ_TYPE_INTERFACE,
-      USB_REQ_TYPE_TYPE | USB_REQ_TYPE_RECIPIENT, cdcacm_control_request);
+    usbd_register_control_callback(
+        dev, USB_REQ_TYPE_CLASS | USB_REQ_TYPE_INTERFACE,
+        USB_REQ_TYPE_TYPE | USB_REQ_TYPE_RECIPIENT, cdcacm_control_request);
 
-  /* Notify the host that DCD is asserted.
-   * Allows the use of /dev/tty* devices on BSD/macOS. */
-  cdcacm_set_modem_state(dev, 0, true, true);
+    /* Notify the host that DCD is asserted.
+     * Allows the use of /dev/tty* devices on BSD/macOS. */
+    cdcacm_set_modem_state(dev, 0, true, true);
 }
 
 static char *serialno_read(char *buf) {
-  volatile uint32_t *DEVICE_ID = (volatile uint32_t *)0x1FFFF7E8;
-  const uint32_t uid = *DEVICE_ID + *(DEVICE_ID + 1) + *(DEVICE_ID + 2);
+    volatile uint32_t *DEVICE_ID = (volatile uint32_t *)0x1FFFF7E8;
+    const uint32_t uid = *DEVICE_ID + *(DEVICE_ID + 1) + *(DEVICE_ID + 2);
 
-  /* Fetch serial number from chip's unique ID. */
-  for (int i = 0; i < 8; i++)
-    buf[7 - i] = ((uid >> (4 * i)) & 0xF) + '0';
+    /* Fetch serial number from chip's unique ID. */
+    for (int i = 0; i < 8; i++)
+        buf[7 - i] = ((uid >> (4 * i)) & 0xF) + '0';
 
-  for (int i = 0; i < 8; i++)
-    if (buf[i] > '9')
-      buf[i] += 'A' - '9' - 1;
-  buf[8] = 0;
+    for (int i = 0; i < 8; i++)
+        if (buf[i] > '9')
+            buf[i] += 'A' - '9' - 1;
+    buf[8] = 0;
 
-  return buf;
+    return buf;
 }
 
 static void usb_data_line_reset(void) {
-  /* This is a somewhat common cheap hack to trigger device re-enumeration
-   * on startup.  Assuming a fixed external pullup on D+, (For USB-FS)
-   * setting the pin to output, and driving it explicitly low effectively
-   * "removes" the pullup.  The subsequent USB init will "take over" the
-   * pin, and it will appear as a proper pullup to the host. */
-  rcc_periph_clock_enable(RCC_GPIOA);
-  gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT, GPIO_CONF_OUTPUT, GPIO12);
-  gpio_clear(GPIOA, GPIO12);
+    /* This is a somewhat common cheap hack to trigger device re-enumeration
+     * on startup.  Assuming a fixed external pullup on D+, (For USB-FS)
+     * setting the pin to output, and driving it explicitly low effectively
+     * "removes" the pullup.  The subsequent USB init will "take over" the
+     * pin, and it will appear as a proper pullup to the host. */
+    rcc_periph_clock_enable(RCC_GPIOA);
+    gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT, GPIO_CONF_OUTPUT, GPIO12);
+    gpio_clear(GPIOA, GPIO12);
 
-  /* The magic delay is somewhat arbitrary, no guarantees on USBIF
-   * compliance here, but "it works" in most places. */
-  for (int i = 0; i < 0x8000; ++i)
-    __asm__ volatile("nop");
+    /* The magic delay is somewhat arbitrary, no guarantees on USBIF
+     * compliance here, but "it works" in most places. */
+    for (int i = 0; i < 0x8000; ++i)
+        __asm__ volatile("nop");
 }
 
 void USB_ISR(void) {
-  assert(usbdev);
-  usbd_poll(usbdev);
+    assert(usbdev);
+    usbd_poll(usbdev);
 }
 
-void cdcacm_init(void) {
-  serialno_read(serialno);
+/* API */
 
-  usb_data_line_reset();
+int cdcacm_init(void) {
+    __rx_at = 0;
+    __rx_len = 0;
+    __tx_at = 0;
+    __tx_len = 0;
 
-  usbdev = usbd_init(&USB_DRV, &device, &config, usb_strings,
-                     sizeof(usb_strings) / sizeof(char *), usbd_control_buffer,
-                     sizeof(usbd_control_buffer));
-  assert(usbdev);
-  usbd_register_set_config_callback(usbdev, cdcacm_set_config);
-  nvic_enable_irq(USB_IRQ);
+    serialno_read(serialno);
+    usb_data_line_reset();
+
+    usbdev = usbd_init(&USB_DRV, &device, &config, usb_strings,
+                       sizeof(usb_strings) / sizeof(char *),
+                       usbd_control_buffer, sizeof(usbd_control_buffer));
+    assert(usbdev);
+    usbd_register_set_config_callback(usbdev, cdcacm_set_config);
+    nvic_enable_irq(USB_IRQ);
+
+    return 0;
 }
 
-int cdcacm_get_configuration(void) { return usbd_configuration; }
+int cdcacm_main(void) {
+    if (!usbd_configuration)
+        return -1;
 
-const char *cdcacm_get_serialno(void) { return serialno; }
+    if (__tx_len > __tx_at) {
+        int len = __tx_len - __tx_at;
+        if (len > CDCACM_PACKET_SIZE)
+            len = CDCACM_PACKET_SIZE;
 
-void cdcacm_write_now(const char *buf, int len) {
-  assert(usbdev);
-  assert(len <= CDCACM_PACKET_SIZE);
-  int i;
-  const char *p = buf;
-  const char *const end = buf + len;
-  while (p < end) {
-    i = 0;
-    while (p + i < end) {
-      if (p[i] == '\r' || p[i] == '\n')
-        break;
-      i++;
+        __tx_at += usbd_ep_write_packet(usbdev, 0x81, __tx_buf + __tx_at, len);
     }
-    if (i > 0) {
-      while (usbd_ep_write_packet(usbdev, 0x81, p, i) == 0)
-        ;
-      p += i;
+
+    if (__tx_at == __tx_len) {
+        __tx_at = 0;
+        __tx_len = 0;
     }
-    if (*p == '\r' || *p == '\n') {
-      while (usbd_ep_write_packet(usbdev, 0x81, "\r\n", 2) == 0)
-        ;
-      p++;
+
+    return 0;
+}
+
+uint16_t cdcacm_len_read(void) { return __rx_len - __rx_at; }
+uint16_t cdcacm_len_line(void) {
+    for (int i = 0; i < __rx_len - __rx_at; i++) {
+        if (__rx_buf[__rx_at + i] == '\r')
+            return i + 1;
     }
-  }
+    return 0;
+}
+
+uint16_t cdcacm_read(char **buf, uint16_t max) {
+    *buf = __rx_buf + __rx_at;
+    uint16_t res = __rx_len - __rx_at < max ? __rx_len - __rx_at : max;
+    __rx_at += res;
+    if (__rx_at == __rx_len) {
+        __rx_at = __rx_len = 0;
+    }
+    return res;
+}
+
+int cdcacm_write(char *buf, uint16_t len) {
+    /* Overflow - write too fast */
+    if (__tx_len + len > CDCACM_BUFSIZE) {
+        return -1;
+    }
+
+    for (int i = 0; i < len; i++) {
+        __tx_buf[__tx_len + i] = buf[i];
+    }
+
+    __tx_len += len;
+    return 0;
+}
+
+void cdcacm_write_hex(char val) {
+    char buf = val & 0xF;
+    if (buf < 10) {
+        buf = '0' + buf;
+    } else {
+        buf = 'A' + (buf - 0xA);
+    }
+    cdcacm_write(&buf, 1);
 }

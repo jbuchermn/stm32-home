@@ -1,4 +1,6 @@
 bin
 *.bin
+*.elf
+*.ld
 .ccls-cache
 compile_commands.json
