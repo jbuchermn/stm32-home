@@ -80,11 +80,18 @@ void tim2_isr(void) {
     if (timer_get_flag(TIM2, TIM_SR_CC1IF)) {
         timer_clear_flag(TIM2, TIM_SR_CC1IF);
         timer_set_counter(TIM2, 0);
-
         if (__tx_enc_buf[__tx_enc_at]) {
-            gpio_set(GPIOB, GPIO1);
-        } else {
+#ifdef DALI_TX_INV
             gpio_clear(GPIOB, GPIO1);
+#else
+            gpio_set(GPIOB, GPIO1);
+#endif
+        } else {
+#ifdef DALI_TX_INV
+            gpio_set(GPIOB, GPIO1);
+#else
+            gpio_clear(GPIOB, GPIO1);
+#endif
         }
 
         __tx_enc_at++;
@@ -117,6 +124,11 @@ int dali_init(void) {
     /* tx setup */
     gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
                   GPIO1);
+#ifdef DALI_TX_INV
+    gpio_clear(GPIOB, GPIO1);
+#else
+    gpio_set(GPIOB, GPIO1);
+#endif
 
     /* tx timer setup */
     rcc_periph_clock_enable(RCC_TIM2);
@@ -136,13 +148,20 @@ int dali_init(void) {
     rcc_periph_clock_enable(RCC_AFIO);
 
     gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, GPIO0);
-    gpio_set(GPIOB, GPIO0);
+
+#ifdef DALI_RX_INV
+    __rx_state = 0;
+    gpio_clear(GPIOB, GPIO0);
+    exti_set_trigger(EXTI0, EXTI_TRIGGER_RISING);
+#else
     __rx_state = 1;
+    gpio_set(GPIOB, GPIO0);
+    exti_set_trigger(EXTI0, EXTI_TRIGGER_FALLING);
+#endif
 
     nvic_enable_irq(NVIC_EXTI0_IRQ);
     exti_select_source(EXTI0, GPIOB);
 
-    exti_set_trigger(EXTI0, EXTI_TRIGGER_RISING);
     exti_enable_request(EXTI0);
     return 0;
 }
@@ -160,8 +179,6 @@ int dali_read(char *byte1, char *byte2) {
             total += __rx_buf[i];
 
             int total_dali = (int)(0.5 + (double)total / DALI_TICK);
-            cdcacm_write_hex(total_dali);
-            cdcacm_write(" ", 1);
 
             if (i == 0) {
                 /* start bit */
@@ -170,10 +187,6 @@ int dali_read(char *byte1, char *byte2) {
                 pos++;
             }
         }
-
-        cdcacm_write("=", 1);
-        cdcacm_write_hex(pos);
-        cdcacm_write("\n", 1);
 
         __rx_at = -1;
 
