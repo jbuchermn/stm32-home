@@ -13,6 +13,6 @@ uint16_t cdcacm_len_read(void);
 uint16_t cdcacm_len_line(void);
 uint16_t cdcacm_read(char **buf, uint16_t max);
 int cdcacm_write(char *buf, uint16_t len);
-void cdcacm_write_hex(char val);
+void cdcacm_write_hex(int val, uint8_t len);
 
 #endif

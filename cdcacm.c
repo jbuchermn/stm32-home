@@ -361,12 +361,19 @@ int cdcacm_write(char *buf, uint16_t len) {
     return 0;
 }
 
-void cdcacm_write_hex(char val) {
-    char buf = val & 0xF;
-    if (buf < 10) {
-        buf = '0' + buf;
-    } else {
-        buf = 'A' + (buf - 0xA);
+void cdcacm_write_hex(int val, uint8_t len) {
+    if (val < 0) {
+        cdcacm_write("-", 1);
+        val *= -1;
     }
-    cdcacm_write(&buf, 1);
+
+    for (int i = len - 1; i >= 0; i--) {
+        char buf = (val >> (4 * i)) & 0xF;
+        if (buf < 10) {
+            buf = '0' + buf;
+        } else {
+            buf = 'A' + (buf - 0xA);
+        }
+        cdcacm_write(&buf, 1);
+    }
 }
