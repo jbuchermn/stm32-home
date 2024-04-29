@@ -15,11 +15,19 @@ typedef enum {
     DALI_HIGH
 } dali_prio;
 
+struct dali_msg {
+    int len;
+    char data[3];
+    dali_prio prio;
+    bool error;
+};
+
 int dali_init(void);
 int dali_main(void);
-int dali_write(char *byte1, char *byte2, dali_prio prio);
+
+int dali_write(char *buf, int len, dali_prio prio);
 
 /* number of bytes, negative = corrupt packet */
-int dali_read(char *byte1, char *byte2);
+int dali_read(char *buf);
 
 #endif

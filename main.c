@@ -3,8 +3,10 @@
 
 #include "main.h"
 
+#include "app.h"
 #include "cdcacm.h"
 #include "dali.h"
+#include "led.h"
 #include "platform.h"
 
 static int error;
@@ -21,19 +23,17 @@ static void __sleep_until(uint32_t ticks) {
 static void main_tick(void) {
     cdcacm_main();
     dali_main();
+    app_main();
 
-    char dali1, dali2;
+    char dali[3];
     int len;
-    if ((len = dali_read(&dali1, &dali2))) {
+    if ((len = dali_read(dali))) {
         cdcacm_write("[DALI] RX ", 10);
         if (len < 0) {
             cdcacm_write("ERR", 3);
         } else {
-            cdcacm_write_hex(dali1 >> 4);
-            cdcacm_write_hex(dali1 & 15);
-            if (len == 2) {
-                cdcacm_write_hex(dali2 >> 4);
-                cdcacm_write_hex(dali2 & 15);
+            for (int i = 0; i < len; i++) {
+                cdcacm_write_hex(dali[i], 2);
             }
         }
         cdcacm_write("\n", 1);
@@ -42,10 +42,18 @@ static void main_tick(void) {
     }
 
     uint16_t line;
-    /* TODO: Send multiple commands in one line, send single-line commands */
+    /* TODO: Send multiple commands in one line, send single-byte or three-byte
+     * commands */
     if ((line = cdcacm_len_line()) > 0) {
         char *buf;
         cdcacm_read(&buf, 6);
+        if (buf[0] == 't' && line >= 1) {
+            char dali_buf[2];
+            dali_buf[0] = 0x12;
+            dali_buf[1] = 0x34;
+            dali_write(dali_buf, 2, DALI_MIDDLE_LOW);
+            cdcacm_write("[DALI] TX 1234\n", 15);
+        }
 
         if (buf[0] == 'd' && line >= 5) {
             char temp[5];
@@ -53,15 +61,14 @@ static void main_tick(void) {
             temp[4] = 0;
             long tmp = strtol(temp, 0, 16);
 
-            char byte1 = tmp >> 8;
-            char byte2 = tmp & 0xFF;
+            char dali_buf[2];
+            dali_buf[0] = tmp >> 8;
+            dali_buf[1] = tmp & 0xFF;
 
-            dali_write(&byte1, &byte2, DALI_MIDDLE_LOW /* TODO */);
+            dali_write(dali_buf, 2, DALI_MIDDLE_LOW /* TODO */);
             cdcacm_write("[DALI] TX ", 10);
-            cdcacm_write_hex(byte1 >> 4);
-            cdcacm_write_hex(byte1 & 15);
-            cdcacm_write_hex(byte2 >> 4);
-            cdcacm_write_hex(byte2 & 15);
+            cdcacm_write_hex(dali_buf[0], 2);
+            cdcacm_write_hex(dali_buf[1], 2);
             cdcacm_write("\n", 1);
 
         } else if (buf[0] == 'r' && line >= 5) {
@@ -70,13 +77,13 @@ static void main_tick(void) {
             temp[4] = 0;
             long tmp = strtol(temp, 0, 16);
 
-            char byte1 = tmp >> 8;
-            char byte2 = tmp & 0xFF;
+            char dali_buf[2];
+            dali_buf[0] = tmp >> 8;
+            dali_buf[1] = tmp & 0xFF;
+
             cdcacm_write("[DALI] RX ", 10);
-            cdcacm_write_hex(byte1 >> 4);
-            cdcacm_write_hex(byte1 & 15);
-            cdcacm_write_hex(byte2 >> 4);
-            cdcacm_write_hex(byte2 & 15);
+            cdcacm_write_hex(dali_buf[0], 2);
+            cdcacm_write_hex(dali_buf[1], 2);
             cdcacm_write("\n", 1);
 
             /* TODO: Handle DALI command */
@@ -100,11 +107,18 @@ int main(void) {
     platform_init();
     cdcacm_init();
     dali_init();
+    led_init();
+
+    uint16_t curr = 0;
 
     uint32_t t = get_systick();
     while (1) {
         t += SYSTICK_FREQ;
         sleep_until(t);
+
+        for (int i = 0; i < 12; i++)
+            led_set(i, curr);
+        curr += 1000;
 
         set_led(1);
         if (error) {
