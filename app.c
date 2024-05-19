@@ -33,10 +33,12 @@ void app_init(void) {
 }
 
 void app_handle_dali(char *dali, int len) {
+    /* TODO: POC */
     if (len == 2 && dali[0] == 0) {
         led_set_smooth(0, dali[1] * LED_MAX / 255);
     }
 }
+void app_handle_knx(struct knx_telegram *telegram) { /* TODO */ }
 void app_main(void) {
     for (int i = 0; i < LED_COUNT; i++) {
         if (__led_target[i] < __led_current[i]) {

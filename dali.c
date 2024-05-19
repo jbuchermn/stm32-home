@@ -50,25 +50,25 @@
 #define DALI_FREQ (2 * 1200)
 #define DALI_TICK (SYSTICK_FREQ / DALI_FREQ)
 
-volatile struct dali_msg __rx_queue[DALI_RX_QUEUE_LEN];
-volatile int __rx_queue_at;
-volatile int __rx_queue_len;
+static volatile struct dali_msg __rx_queue[DALI_RX_QUEUE_LEN];
+static volatile int __rx_queue_at;
+static volatile int __rx_queue_len;
 
-volatile struct dali_msg __tx_queue[DALI_TX_QUEUE_LEN];
-volatile int __tx_queue_at;
-volatile int __tx_queue_len;
+static volatile struct dali_msg __tx_queue[DALI_TX_QUEUE_LEN];
+static volatile int __tx_queue_at;
+static volatile int __tx_queue_len;
 
-volatile uint8_t __rx_buf[DALI_RX_BUF_LEN];
-volatile int __rx_at; /* -1 = not started */
+static volatile uint8_t __rx_buf[DALI_RX_BUF_LEN];
+static volatile int __rx_at; /* -1 = not started */
 
-volatile uint8_t __rx_halfbits[DALI_RX_BUF_LEN / DALI_OVERSAMPLE];
-volatile uint8_t __rx_n_halfbits;
+static volatile uint8_t __rx_halfbits[DALI_RX_BUF_LEN / DALI_OVERSAMPLE];
+static volatile uint8_t __rx_n_halfbits;
 
-volatile char __tx_enc_buf[DALI_TX_BUF_LEN];
-volatile uint8_t __tx_enc_len;
-volatile int __tx_enc_at; /* -1 = not started */
+static volatile char __tx_enc_buf[DALI_TX_BUF_LEN];
+static volatile uint8_t __tx_enc_len;
+static volatile int __tx_enc_at; /* -1 = not started */
 
-volatile uint32_t __settling_start_tick;
+static volatile uint32_t __settling_start_tick;
 
 /* Pins */
 #define DALI_RX_PORT GPIOA

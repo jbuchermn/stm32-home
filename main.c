@@ -8,6 +8,7 @@
 #include "app.h"
 #include "cdcacm.h"
 #include "dali.h"
+#include "knx.h"
 #include "led.h"
 #include "platform.h"
 
@@ -24,6 +25,7 @@ static void __sleep_until(uint32_t ticks) {
 
 static void main_tick(void) {
     cdcacm_main();
+    knx_main();
     dali_main();
     app_main();
 
@@ -45,13 +47,20 @@ static void main_tick(void) {
         app_handle_dali(dali, len);
     }
 
+    struct knx_telegram telegram;
+    if (knx_read(&telegram)) {
+#ifdef CONFIG_ECHO_KNX
+        cdcacm_write("[KNX] RX ", 10);
+        /* TODO: Write packet */
+        cdcacm_write("\n", 1);
+#endif
+        app_handle_knx(&telegram);
+    }
+
     uint16_t line;
     if ((line = cdcacm_len_line()) > 1) {
         char *buf;
         cdcacm_read(&buf, line);
-
-        /* full line read, contains \r at end */
-        // line -= 1;
 
         int at = 0;
         for (int i = 0; i <= line; i++) {
@@ -79,20 +88,15 @@ void sleep_until(uint32_t ticks) {
 int main(void) {
     platform_init();
     cdcacm_init();
+    knx_init();
     dali_init();
     led_init();
     app_init();
-
-    uint16_t curr = 0;
 
     uint32_t t = get_systick();
     while (1) {
         t += SYSTICK_FREQ;
         sleep_until(t);
-
-        for (int i = 0; i < 12; i++)
-            led_set(i, curr);
-        curr += 1000;
 
         set_led(1);
         if (error) {
