@@ -4,6 +4,8 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/timer.h>
 
+#include "cdcacm.h"
+
 static bool __led_state[LED_COUNT];
 
 static void setup_timer(uint32_t timer) {
@@ -16,11 +18,16 @@ static void setup_timer(uint32_t timer) {
 
     timer_set_oc_value(timer, TIM_OC1, 0);
     timer_enable_oc_preload(timer, TIM_OC1);
+    timer_enable_oc_preload(timer, TIM_OC2);
+    timer_enable_oc_preload(timer, TIM_OC3);
+    timer_enable_oc_preload(timer, TIM_OC4);
 
     timer_set_oc_mode(timer, TIM_OC1, TIM_OCM_PWM1);
     timer_set_oc_mode(timer, TIM_OC2, TIM_OCM_PWM1);
     timer_set_oc_mode(timer, TIM_OC3, TIM_OCM_PWM1);
     timer_set_oc_mode(timer, TIM_OC4, TIM_OCM_PWM1);
+
+    timer_enable_break_main_output(timer);
 
     timer_enable_oc_output(timer, TIM_OC1);
     timer_enable_oc_output(timer, TIM_OC2);

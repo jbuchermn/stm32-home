@@ -45,8 +45,6 @@
 
 #define DALI_OVERSAMPLE 8
 #define DALI_STOP_COND 4 * DALI_OVERSAMPLE
-#define DALI_THR_HIGH 7
-#define DALI_THR_LOW 1
 #define DALI_RX_BUF_LEN 54 * DALI_OVERSAMPLE
 #define DALI_TX_BUF_LEN 51
 #define DALI_FREQ (2 * 1200)
@@ -63,6 +61,9 @@ volatile int __tx_queue_len;
 volatile uint8_t __rx_buf[DALI_RX_BUF_LEN];
 volatile int __rx_at; /* -1 = not started */
 
+volatile uint8_t __rx_halfbits[DALI_RX_BUF_LEN / DALI_OVERSAMPLE];
+volatile uint8_t __rx_n_halfbits;
+
 volatile char __tx_enc_buf[DALI_TX_BUF_LEN];
 volatile uint8_t __tx_enc_len;
 volatile int __tx_enc_at; /* -1 = not started */
@@ -71,12 +72,14 @@ volatile uint32_t __settling_start_tick;
 
 /* Pins */
 #define DALI_RX_PORT GPIOA
+#define DALI_RX_PORT_RCC RCC_GPIOA
 #define DALI_RX_PIN GPIO0
 #define DALI_RX_EXTI EXTI0
 #define DALI_RX_EXTI_ISR exti0_isr
 #define DALI_RX_EXTI_NVIC NVIC_EXTI0_IRQ
 
 #define DALI_TX_PORT GPIOA
+#define DALI_TX_PORT_RCC RCC_GPIOA
 #define DALI_TX_PIN GPIO1
 
 /* Handlers */
@@ -85,11 +88,11 @@ void DALI_RX_EXTI_ISR(void) {
     if (__rx_at < 0) {
         /* Start RX */
         __rx_at = 0;
+
         bool val = gpio_get(DALI_RX_PORT, DALI_RX_PIN);
 #ifdef DALI_RX_INV
         val = !val;
 #endif
-
         __rx_buf[0] = val;
         __rx_at++;
 
@@ -102,42 +105,57 @@ void DALI_RX_EXTI_ISR(void) {
 }
 
 static bool rx_contains_stop(void) {
-    int highs = 0;
-    if (__rx_at >= DALI_STOP_COND) {
-        for (int i = __rx_at - DALI_STOP_COND; i < __rx_at; i++) {
-            if (__rx_buf[i])
-                highs++;
-        }
-
-        if (highs < DALI_STOP_COND * DALI_THR_HIGH / DALI_OVERSAMPLE)
-            return false;
-
-    } else {
+    /* Check if stop condition is at end of buffer */
+    if (__rx_at <= DALI_STOP_COND)
         return false;
+    int c = 0;
+    for (int i = __rx_at - DALI_STOP_COND; i < __rx_at; i++) {
+        if (!__rx_buf[i])
+            c++;
+    }
+    if (c > 1)
+        return false;
+
+    /* clean possible twitches (at most one sample) */
+    for (int i = 1; i < __rx_at - 1; i++) {
+        if (__rx_buf[i] != __rx_buf[i - 1] && __rx_buf[i] != __rx_buf[i + 1])
+            __rx_buf[i] = __rx_buf[i - 1];
+    }
+
+    /* parse halfbits */
+    __rx_n_halfbits = 0;
+    int b = 0;
+    for (int i = 1; i < __rx_at; i++) {
+        if (__rx_buf[i] != __rx_buf[b]) {
+            int elapsed =
+                (int)((double)(i - b) / (double)DALI_OVERSAMPLE + 0.5);
+            if (elapsed > 2)
+                /* error, more than two identical halfbits */
+                break;
+            for (int k = 0; k < elapsed; k++) {
+                __rx_halfbits[__rx_n_halfbits] = __rx_buf[b];
+                __rx_n_halfbits++;
+                if (__rx_n_halfbits >= DALI_RX_BUF_LEN / DALI_OVERSAMPLE)
+                    __rx_n_halfbits = 0;
+            }
+            b = i;
+        }
+    }
+
+    /* append halfbit 1, which may be recognized as part of stop cond */
+    if (__rx_n_halfbits % 2 == 1) {
+        __rx_halfbits[__rx_n_halfbits] = 1;
+        __rx_n_halfbits++;
     }
 
     return true;
 }
 
-static int rx_parse_halfbit(int idx) {
-    int c = 0, h = 0;
-    for (int i = idx * DALI_OVERSAMPLE; i < (idx + 1) * DALI_OVERSAMPLE; i++) {
-        c++;
-        h += __rx_buf[i] ? 1 : 0;
-    }
-
-    if (c < DALI_OVERSAMPLE)
-        return -1;
-    if (h <= DALI_THR_LOW)
-        return 0;
-    if (h >= DALI_THR_HIGH)
-        return 1;
-    return -1;
-}
-
 static int rx_parse_bit(int idx) {
-    int b1 = rx_parse_halfbit(idx * 2);
-    int b2 = rx_parse_halfbit(idx * 2 + 1);
+    if (idx * 2 + 1 >= __rx_n_halfbits)
+        return -1;
+    int b1 = __rx_halfbits[idx * 2];
+    int b2 = __rx_halfbits[idx * 2 + 1];
     if (b1 < 0 || b2 < 0)
         return -1;
     if (b1 == 0 && b2 == 1)
@@ -150,6 +168,7 @@ static int rx_parse_bit(int idx) {
 void tim2_isr(void) {
     /* Missing part: Collision detection */
     if (timer_get_flag(TIM2, TIM_SR_CC1IF)) {
+
         bool rx_done = false;
         bool tx_done = false;
         uint32_t tick = get_systick();
@@ -274,8 +293,8 @@ int dali_init(void) {
 
     __settling_start_tick = 0;
 
-    rcc_periph_clock_enable(DALI_RX_PORT);
-    rcc_periph_clock_enable(DALI_TX_PORT);
+    rcc_periph_clock_enable(DALI_RX_PORT_RCC);
+    rcc_periph_clock_enable(DALI_TX_PORT_RCC);
 
     /* timer setup */
     rcc_periph_clock_enable(RCC_TIM2);
@@ -403,3 +422,11 @@ int dali_main(void) {
 
     return 0;
 }
+
+/*
+ * dma3fe,dm012a
+ * dm0198
+ *
+ * https://electronics.stackexchange.com/questions/663269/dali-protocol-d4i-how-to-access-to-memory-bank-dtr0-dtr1-at-byte-level-using
+ *
+ */

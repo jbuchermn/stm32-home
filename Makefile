@@ -3,7 +3,7 @@
 PROJECT=stm32-test
 BUILD_DIR=bin
 
-CFILES=main.c platform.c cdcacm.c dali.c util.c led.c
+CFILES=main.c platform.c cdcacm.c dali.c util.c led.c app.c
 AFILES= 
 LDLIBS=
 

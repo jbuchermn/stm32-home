@@ -3,6 +3,8 @@
 
 #include "main.h"
 
+#include "config.h"
+
 #include "app.h"
 #include "cdcacm.h"
 #include "dali.h"
@@ -28,6 +30,7 @@ static void main_tick(void) {
     char dali[3];
     int len;
     if ((len = dali_read(dali))) {
+#ifdef CONFIG_ECHO_DALI
         cdcacm_write("[DALI] RX ", 10);
         if (len < 0) {
             cdcacm_write("ERR", 3);
@@ -37,56 +40,26 @@ static void main_tick(void) {
             }
         }
         cdcacm_write("\n", 1);
+#endif
 
-        /* TODO: Handle DALI command */
+        app_handle_dali(dali, len);
     }
 
     uint16_t line;
-    /* TODO: Send multiple commands in one line, send single-byte or three-byte
-     * commands */
-    if ((line = cdcacm_len_line()) > 0) {
+    if ((line = cdcacm_len_line()) > 1) {
         char *buf;
-        cdcacm_read(&buf, 6);
-        if (buf[0] == 't' && line >= 1) {
-            char dali_buf[2];
-            dali_buf[0] = 0x12;
-            dali_buf[1] = 0x34;
-            dali_write(dali_buf, 2, DALI_MIDDLE_LOW);
-            cdcacm_write("[DALI] TX 1234\n", 15);
-        }
+        cdcacm_read(&buf, line);
 
-        if (buf[0] == 'd' && line >= 5) {
-            char temp[5];
-            strncpy(temp, buf + 1, 4);
-            temp[4] = 0;
-            long tmp = strtol(temp, 0, 16);
+        /* full line read, contains \r at end */
+        // line -= 1;
 
-            char dali_buf[2];
-            dali_buf[0] = tmp >> 8;
-            dali_buf[1] = tmp & 0xFF;
-
-            dali_write(dali_buf, 2, DALI_MIDDLE_LOW /* TODO */);
-            cdcacm_write("[DALI] TX ", 10);
-            cdcacm_write_hex(dali_buf[0], 2);
-            cdcacm_write_hex(dali_buf[1], 2);
-            cdcacm_write("\n", 1);
-
-        } else if (buf[0] == 'r' && line >= 5) {
-            char temp[5];
-            strncpy(temp, buf + 1, 4);
-            temp[4] = 0;
-            long tmp = strtol(temp, 0, 16);
-
-            char dali_buf[2];
-            dali_buf[0] = tmp >> 8;
-            dali_buf[1] = tmp & 0xFF;
-
-            cdcacm_write("[DALI] RX ", 10);
-            cdcacm_write_hex(dali_buf[0], 2);
-            cdcacm_write_hex(dali_buf[1], 2);
-            cdcacm_write("\n", 1);
-
-            /* TODO: Handle DALI command */
+        int at = 0;
+        for (int i = 0; i <= line; i++) {
+            if (i == line || buf[i] == ',') {
+                if (i > at)
+                    app_usb_command(buf + at, i - at);
+                at = i + 1;
+            }
         }
     }
 }
@@ -108,6 +81,7 @@ int main(void) {
     cdcacm_init();
     dali_init();
     led_init();
+    app_init();
 
     uint16_t curr = 0;
 
