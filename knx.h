@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 struct knx_telegram {
+    bool is_echo;
+    bool ack; /* only relevant if is_echo */
+
     bool repeated;
     char priority;
 

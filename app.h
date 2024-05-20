@@ -5,6 +5,8 @@
 
 void app_init(void);
 
+bool app_knx_is_addressed(struct knx_telegram *telegram);
+
 void app_handle_knx(struct knx_telegram *telegram);
 void app_handle_dali(char *dali, int len);
 void app_main(void);

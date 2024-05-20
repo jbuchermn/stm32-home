@@ -50,8 +50,19 @@ static void main_tick(void) {
     struct knx_telegram telegram;
     if (knx_read(&telegram)) {
 #ifdef CONFIG_ECHO_KNX
-        cdcacm_write("[KNX] RX ", 10);
-        /* TODO: Write packet */
+        if (telegram.is_echo) {
+            cdcacm_write("[KNX] TX ", 10);
+        } else {
+            cdcacm_write("[KNX] RX ", 10);
+        }
+        cdcacm_write_hex(telegram.source_address, 4);
+        cdcacm_write(" -> ", 4);
+        cdcacm_write_hex(telegram.target_address, 4);
+        cdcacm_write(": ", 2);
+        cdcacm_write_hex(telegram.apci, 4);
+        if (telegram.ack) {
+            cdcacm_write(" (ACK)", 6);
+        }
         cdcacm_write("\n", 1);
 #endif
         app_handle_knx(&telegram);

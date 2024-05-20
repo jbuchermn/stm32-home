@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define MAIN_FREQ 100
+#define MAIN_FREQ 50
 
 void sleep_until(uint32_t ticks);
 

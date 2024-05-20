@@ -6,6 +6,7 @@
 #include <libopencm3/stm32/usart.h>
 #include <string.h>
 
+#include "app.h"
 #include "cdcacm.h"
 
 /*
@@ -46,13 +47,10 @@
  *      10000001 / 10000000
  *      --------
  *      00110011 / 00110010
- *
- ** Question:
- *  - Send IACKs by U_SetAddress.req or by U_Ackn.req?
  */
 
 #define KNX_RX_BUF_LEN 264
-#define KNX_TX_BUF_LEN 64
+#define KNX_TX_BUF_LEN 128
 #define KNX_DECODED_LEN 16
 
 static volatile char __rx_buf[KNX_RX_BUF_LEN];
@@ -65,17 +63,25 @@ static volatile int __rx_decoded_read;
 static volatile char __tx_buf[KNX_TX_BUF_LEN];
 static volatile int __tx_at;
 static volatile int __tx_written;
+static volatile bool __tx_waiting_for_echo;
 
-static void send_ack(bool nack, bool busy, bool addressed) {
+static bool push_byte(char byte) {
     if (__tx_at >= KNX_TX_BUF_LEN)
-        return;
-    __tx_buf[__tx_at] = 0b00010 | (nack << 2) | (busy << 1) | addressed;
+        return false;
+    __tx_buf[__tx_at] = byte;
+    __tx_at++;
 
     /* enable transmit */
     USART_CR1(USART2) |= USART_CR1_TXEIE;
+
+    return true;
 }
 
-static int decode_telegram() {
+static void send_ack(bool nack, bool busy, bool addressed) {
+    push_byte(0b00010000 | (nack << 2) | (busy << 1) | addressed);
+}
+
+static int decode_telegram(void) {
     /*
      * -2 = error
      * -1 = not complete, receive in progress
@@ -90,11 +96,28 @@ static int decode_telegram() {
         return -2;
     struct knx_telegram *telegram = __rx_decoded_buf + __rx_decoded_at;
 
+    if (__tx_waiting_for_echo) {
+        if (__rx_buf[0] == 0x0B || __rx_buf[0] == 0x8B) {
+            telegram->is_echo = true;
+            telegram->ack = __rx_buf[0] & 0b10000000;
+
+            __rx_at = 0;
+            __rx_decoded_at++;
+            return 1;
+        }
+    } else {
+        telegram->is_echo = false;
+        telegram->ack = false;
+    }
+
     char request_type = (__rx_buf[0] & 0b11000000) >> 6;
     telegram->repeated = !(__rx_buf[0] & 0b00100000);
     telegram->priority = (__rx_buf[0] & 0b00001100) >> 2;
 
-    if (request_type == 0b10) {
+    bool valid_control =
+        (__rx_buf[0] & 0b0010000) && (~__rx_buf[0] & 0b00000011);
+
+    if (valid_control && request_type == 0b10) {
         /* Data Request */
         if (__rx_at < 6)
             return -1;
@@ -130,22 +153,28 @@ static int decode_telegram() {
 
         /* check CRC */
         char parity = 0b11111111;
-        for (int i = 0; i < __rx_at - 1; i++) {
+        for (int i = 0; i < payload_length + 7; i++) {
             parity ^= __rx_buf[i];
         }
 
-        if (parity != __rx_buf[__rx_at - 1]) {
+        if (parity != __rx_buf[payload_length + 7]) {
             /* decode error */
             __rx_at = 0;
             return -2;
         }
 
-        /* done */
-        __rx_decoded_at++;
-        __rx_at = 0;
-        return 1;
+        if (__tx_waiting_for_echo) {
+            /* exit condition after first byte */
+            __rx_at = 0;
+            return -1;
+        } else {
+            /* done */
+            __rx_decoded_at++;
+            __rx_at = 0;
+            return 1;
+        }
 
-    } else if (request_type == 0b00) {
+    } else if (valid_control && request_type == 0b00) {
         /* Extended Data Request - ignore */
         if (__rx_at < 7)
             return -1;
@@ -155,14 +184,20 @@ static int decode_telegram() {
 
         __rx_at = 0;
         return 0;
-    } else if (request_type == 0b11) {
+    } else if (valid_control && request_type == 0b11) {
         /* Poll Data Request - ignore */
         if (__rx_at < 7)
             return -1;
 
         __rx_at = 0;
         return 0;
+    } else {
+        /* mismatch */
+        __rx_at = 0;
+        return -2;
     }
+
+    return -1;
 }
 
 void usart2_isr(void) {
@@ -177,8 +212,12 @@ void usart2_isr(void) {
             __rx_at--;
 
         if (decode_telegram() == 1) {
-            /* TODO: Send ACK only if sensible */
-            send_ack(false, false, true);
+            if (!__tx_waiting_for_echo) {
+                send_ack(false, false,
+                         app_knx_is_addressed(__rx_decoded_buf +
+                                              __rx_decoded_at - 1));
+            }
+            __tx_waiting_for_echo = false;
         }
     }
 
@@ -191,11 +230,10 @@ void usart2_isr(void) {
             __tx_written++;
         }
 
-        if (__tx_written < __tx_at) {
-            /* re-enable interrupt */
-            USART_CR1(USART2) &= ~USART_CR1_TXEIE;
-        } else {
+        if (__tx_written >= __tx_at) {
             __tx_written = __tx_at = 0;
+            /* disable interrupt */
+            USART_CR1(USART2) &= ~USART_CR1_TXEIE;
         }
     }
 }
@@ -207,6 +245,7 @@ int knx_init(void) {
 
     __tx_at = 0;
     __tx_written = 0;
+    __tx_waiting_for_echo = false;
 
     /*
      * TX: PA2
@@ -220,7 +259,7 @@ int knx_init(void) {
     gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO_USART2_RX);
 
     usart_set_baudrate(USART2, 19200);
-    usart_set_databits(USART2, 8);
+    usart_set_databits(USART2, 9);
     usart_set_stopbits(USART2, USART_STOPBITS_1);
     usart_set_mode(USART2, USART_MODE_TX_RX);
     usart_set_parity(USART2, USART_PARITY_EVEN);
@@ -230,6 +269,8 @@ int knx_init(void) {
     USART_CR1(USART2) |= USART_CR1_RXNEIE;
 
     usart_enable(USART2);
+
+    return 0;
 }
 
 int knx_read(struct knx_telegram *telegram) {
@@ -246,13 +287,91 @@ int knx_read(struct knx_telegram *telegram) {
 }
 
 int knx_write(struct knx_telegram *telegram) {
-    /* TODO: Encode into __tx_buf */
+    char parity = 0b11111111;
 
-    /* enable transmit */
-    USART_CR1(USART2) |= USART_CR1_TXEIE;
+    /* control byte */
+    char control = 0b10010000;
+    control |= !telegram->repeated << 5;
+    control |= telegram->priority << 2;
+    if (!push_byte(0b10000000))
+        return -1;
+    parity ^= control;
+    if (!push_byte(control))
+        return -1;
 
+    /* source address */
+    if (!push_byte(0b10000000 + 1))
+        return -1;
+    parity ^= telegram->source_address >> 8;
+    if (!push_byte(telegram->source_address >> 8))
+        return -1;
+    if (!push_byte(0b10000000 + 2))
+        return -1;
+    parity ^= telegram->source_address & 0xFF;
+    if (!push_byte(telegram->source_address & 0xFF))
+        return -1;
+
+    /* target address */
+    if (!push_byte(0b10000000 + 3))
+        return -1;
+    parity ^= telegram->target_address >> 8;
+    if (!push_byte(telegram->target_address >> 8))
+        return -1;
+    if (!push_byte(0b10000000 + 4))
+        return -1;
+    parity ^= telegram->target_address & 0xFF;
+    if (!push_byte(telegram->target_address & 0xFF))
+        return -1;
+
+    /* NPCI */
+    char npci = 0;
+    npci |= telegram->target_is_group_address << 7;
+    npci |= telegram->routing_counter << 4;
+    npci |= (telegram->payload_len + 1) & 0xF;
+    if (!push_byte(0b10000000 + 5))
+        return -1;
+    parity ^= npci;
+    if (!push_byte(npci))
+        return -1;
+
+    /* TPCI / APCI */
+    char tpci = 0;
+    if (telegram->sequence >= 0) {
+        tpci |= 1 << 6;
+        tpci |= telegram->sequence << 2;
+    }
+    tpci |= (telegram->apci >> 8) & 0b11;
+    if (!push_byte(0b10000000 + 6))
+        return -1;
+    parity ^= tpci;
+    if (!push_byte(tpci))
+        return -1;
+    if (!push_byte(0b10000000 + 7))
+        return -1;
+    parity ^= telegram->apci & 0xFF;
+    if (!push_byte(telegram->apci & 0xFF))
+        return -1;
+
+    /* Payload */
+    for (int i = 0; i < telegram->payload_len; i++) {
+        if (!push_byte(0b10000000 + 8 + i))
+            return -1;
+        parity ^= telegram->payload[i];
+        if (!push_byte(telegram->payload[i]))
+            return -1;
+    }
+
+    /* CRC */
+    if (!push_byte(0b01000000 + 8 + telegram->payload_len))
+        return -1;
+    if (!push_byte(parity))
+        return -1;
+
+    __tx_waiting_for_echo = true;
     return 0;
 }
 
-int knx_main(void) { /* nop */
+int knx_main(void) {
+    /* nop */
+    return 0;
 }

@@ -33,12 +33,24 @@ void app_init(void) {
 }
 
 void app_handle_dali(char *dali, int len) {
-    /* TODO: POC */
+    /* POC */
     if (len == 2 && dali[0] == 0) {
         led_set_smooth(0, dali[1] * LED_MAX / 255);
     }
 }
-void app_handle_knx(struct knx_telegram *telegram) { /* TODO */ }
+
+void app_handle_knx(struct knx_telegram *telegram) {
+    /* POC */
+    if (telegram->target_is_group_address &&
+        telegram->target_address == 0x0003) {
+        led_set_smooth(0, (telegram->apci & 0x01) * LED_MAX);
+    }
+}
+bool app_knx_is_addressed(struct knx_telegram *telegram) {
+    return telegram->target_is_group_address &&
+           telegram->target_address == 0x0003;
+}
+
 void app_main(void) {
     for (int i = 0; i < LED_COUNT; i++) {
         if (__led_target[i] < __led_current[i]) {
@@ -59,13 +71,33 @@ void app_main(void) {
 }
 
 void app_usb_command(char *cmd, int len) {
-    /* command t: send dummy test */
+    /* command t: send dummy test  via DALI */
     if (cmd[0] == 't') {
         char dali_buf[2];
         dali_buf[0] = 0x01;
         dali_buf[1] = 0x92;
         dali_write(dali_buf, 2, DALI_MIDDLE_LOW);
         cdcacm_write("[DALI] TX 0192\n", 15);
+    }
+
+    /* command T: send dummy test  via KNX */
+    else if (cmd[0] == 'T') {
+        struct knx_telegram test;
+        /* UDP defaults */
+        test.repeated = false;
+        test.priority = 0b11;
+        test.routing_counter = 0b110;
+        test.sequence = -1;
+
+        /* content */
+        test.source_address = 0b0001000100001110;
+        test.target_address = 0x0006;
+        test.target_is_group_address = true;
+        test.apci = 0x081;
+        test.payload_len = 0;
+
+        knx_write(&test);
+        cdcacm_write("[KNX] TX Test\n", 15);
     }
 
     /* command d: send DALI with priority (BLlmhH) - e.g. dm0192 */
